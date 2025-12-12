@@ -1,0 +1,79 @@
+terraform {
+  required_providers {
+    azuread = {
+      source  = "hashicorp/azuread"
+      version = "~> 2.0"
+    }
+  }
+}
+
+variable "groups" {
+  description = <<EOT
+Map of groups to create. Each key is an internal name; values include:
+- display_name: Entra group display name
+- owners_upns: set of owner UPNs (emails)
+- members_upns: set of permanent member UPNs (emails)
+- description: optional
+EOT
+
+  type = map(object({
+    display_name = string
+    description  = optional(string)
+    owners_upns  = set(string)
+    members_upns = set(string)
+  }))
+}
+
+# --- Lookup all unique UPNs once (owners + members across all groups) ---
+
+locals {
+  all_upns = toset(flatten([
+    for _, g in var.groups : concat(
+      tolist(g.owners_upns),
+      tolist(g.members_upns)
+    )
+  ]))
+}
+
+data "azuread_user" "by_upn" {
+  for_each            = local.all_upns
+  user_principal_name = each.value
+}
+
+# --- Create groups ---
+resource "azuread_group" "this" {
+  for_each         = var.groups
+  display_name     = each.value.display_name
+  description      = try(each.value.description, null)
+  security_enabled = true
+
+  owners = [
+    for upn in each.value.owners_upns : data.azuread_user.by_upn[upn].object_id
+  ]
+}
+
+# --- Permanent membership (Terraform-managed) ---
+# Create one membership resource per (group, member)
+locals {
+  group_member_pairs = merge([
+    for gk, g in var.groups : {
+      for upn in g.members_upns :
+      "${gk}::${upn}" => {
+        group_key = gk
+        upn       = upn
+      }
+    }
+  ]...)
+}
+
+resource "azuread_group_member" "permanent" {
+  for_each         = local.group_member_pairs
+  group_object_id  = azuread_group.this[each.value.group_key].object_id
+  member_object_id = data.azuread_user.by_upn[each.value.upn].object_id
+}
+
+output "group_object_ids" {
+  value = {
+    for k, g in azuread_group.this : k => g.object_id
+  }
+}
