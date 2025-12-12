@@ -1,0 +1,8 @@
+variable "security_groups" {
+  type = map(object({
+    display_name = string
+    description  = optional(string)
+    owners_upns  = set(string)
+    members_upns = set(string)
+  }))
+}
